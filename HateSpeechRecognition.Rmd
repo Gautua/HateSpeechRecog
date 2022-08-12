@@ -1,0 +1,329 @@
+---
+title: "Hate Speech Recognition"
+author: "Gautam Malhotra"
+date: "12/04/2022"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(caret)
+library(doParallel)
+library(plyr)
+library(rpart.plot)
+library(e1071)
+```
+
+#### Question 1
+
+importing data
+```{r}
+data<- read.csv("data_hate_speech.csv")
+```
+
+changing the target variable 'class' to a factor 
+```{r}
+data$class=as.factor(data$class)
+```
+
+
+create a data frame without any text columns, scale that data and add the class back to the data frame
+```{r}
+data_scaled = data[,3:ncol(data)]
+data_scaled = data.frame(scale(data_scaled))
+data_scaled = mutate(data_scaled,class=data$class)
+```
+creating a 80/20 training-test split
+```{r}
+# Splitting into test train-val
+test_index = createDataPartition(data$class,times=1,p=0.2,list = F)
+test_data = data_scaled[test_index,]
+train_val_data = data_scaled[-test_index,]
+```
+Setting up to perform parallel computing back-end
+```{r}
+cl <- makeCluster(6) 
+registerDoParallel(cl)
+```
+
+We will be using the caret  package to train the different models, perform cross validation, tune the hyper-parameters respective to each of the models.
+Although the main factor in our decision of choosing the best method will be the predictive accuracy, we will also be taking in account the time those methods took to be tuned since computational resources are limited.
+
+```{r}
+comp_time = data.frame(matrix(ncol=3,nrow = 0))
+names(comp_time)<-c("Method","Computation time for tuning","time unit")
+```
+
+We use the same train control to maintain consistency in comparison between the different methods.
+```{r}
+#  10-fold cross validation 10 times
+train_ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 10)
+```
+We will be using the following supervised learning methods:
+
+*Classification Tree*
+
+A classification tree has the hyper-parameter cp [Complexity parameter] which controls how complex/ deep the classification tree.
+```{r}
+# store system time to measure how long this process of tuning this model takes
+start_time <- Sys.time()
+tune_grid<-expand.grid(cp=seq(from = 0.001, to = .01, length.out = 10))
+set.seed(2022)
+data.tree <- train(class~.,
+                   data=train_val_data,
+                   method = "rpart",
+                   trControl =  train_ctrl,
+                   tuneGrid = tune_grid)
+end_time<- Sys.time()
+plot(data.tree,main="Classification tree")
+```
+Time taken:
+```{r}
+end_time - start_time
+```
+```{r}
+comp_time[1,]<-c("Classification tree",round(end_time - start_time,3),"seconds")
+```
+
+
+The value for which we get the highest accuracy is achieved is found by:
+```{r}
+data.tree$bestTune
+```
+A cp = 0.005 results in the highest accuracy of approximately 99%
+
+```{r}
+max(data.tree$results$Accuracy)
+```
+```{r}
+model <-rpart::rpart(class~.,
+                   data=train_val_data,cp=.005)
+rpart.plot(model)
+```
+This is a visualization of the best decision tree from our tuning process.
+The percentages represent what percentage of the total training data is at that node. We observe that approximately 87% of the observations are being classified as no_hate at a single node. 
+
+```{r}
+print(varImp(data.tree))
+```
+According to the decision tree, the variable 'w16' has the highest importance in the classifcation of observations.
+
+*Bagging*
+It is a well known fact that classification trees suffer from high variance,bagging uses sampling with replacement from the dataset and improves the stability and accuracy of the classification
+We have 2 hyper-parameters to tune in this model:
+mfinal - The number of trees included in ensemble
+maxdepth - Max tree depth 
+```{r}
+start_time<-Sys.time()
+tune_grid<-expand.grid(mfinal=seq(1,5),
+                       maxdepth = seq(1,5) )
+set.seed(2022)
+data.bagg <- train(class~.,
+                   data=train_val_data,
+                   method = "AdaBag",
+                   trControl =  train_ctrl,
+                   tuneGrid = tune_grid)
+end_time<-Sys.time()
+plot(data.bagg,main="Bagging")
+```
+Time taken
+```{r}
+end_time - start_time
+```
+```{r}
+comp_time[2,]<-c("Bagging tree",round(end_time - start_time,3),"minutes")
+```
+
+
+The value for which we get the highest accuracy is achieved is found by:
+```{r}
+data.bagg$bestTune
+```
+A mfinal = 5 and maxdepth = 5 results in the highest accuracy
+
+```{r}
+max(data.bagg$results$Accuracy)
+```
+```{r}
+print(varImp(data.bagg))
+```
+
+The bagging method does not agree with the decision tree on which variable holds the most importance. Here w3 is the most important variable 
+
+*Boosting*
+Boosting is also a type of ensemble learning method but differs to bagging in the way which learning is done sequentially rather in parallel as done in bagging
+3 hyper-parameters to be tuned
+mfinal - Number of trees
+maxdepth - Max depth of the tree
+coeflearn - coefficient type
+```{r}
+start_time<-Sys.time()
+tune_grid<-expand.grid(mfinal=seq(1,5),maxdepth = seq(1,5),coeflearn = c('Breiman','Freund','Zhu'))
+set.seed(2022)
+data.boost <- train(class~.,
+                   data=train_val_data,
+                   method = "AdaBoost.M1",
+                   trControl =  train_ctrl,
+                   tuneGrid = tune_grid)
+end_time<-Sys.time()
+plot(data.boost,main="Boosting")
+```
+Time taken
+```{r}
+end_time - start_time
+```
+```{r}
+comp_time[3,]<-c("Boosting",round(end_time - start_time,3),"minutes")
+```
+
+
+The value for which we get the highest accuracy is achieved is found by:
+```{r}
+data.boost$bestTune
+```
+A mfinal = 5 and maxdepth = 4, coefficient = Freund results in the highest accuracy
+
+```{r}
+max(data.boost$results$Accuracy)
+```
+Boosting gives the most importance to variable w12 which neither of the two previous methods agree with.
+```{r}
+print(varImp(data.boost))
+```
+
+*Random Forest*
+Random forest is classification tree bagging with addition to sampling how many variables are included in each tree.
+Hyper-parameter to be tuned:
+mtry - number of randomly selected predictors included in each tree
+```{r}
+start_time<-Sys.time()
+tune_grid<-expand.grid(mtry=seq(2,6))
+set.seed(2022)
+data.forest <- train(class~.,
+                   data=train_val_data,
+                   method = "rf",
+                   trControl =  train_ctrl,
+                   tuneGrid = tune_grid)
+end_time<-Sys.time()
+plot(data.forest,main="Random Forest")
+```
+
+```{r}
+print(data.forest$results)
+```
+
+Time taken
+```{r}
+end_time - start_time
+```
+```{r}
+comp_time[4,]<-c("Random Forest",round(end_time - start_time,3),"minutes")
+```
+
+
+The value for which we get the highest accuracy is achieved is found by:
+```{r}
+data.forest$bestTune
+```
+A mfinal = 5 and maxdepth = 4, coefficient = Freund results in the highest accuracy
+
+```{r}
+max(data.forest$results$Accuracy)
+```
+Variable importance:
+```{r}
+plot(varImp(data.forest),main="Variable Importance")
+```
+We see that the w16 variable is acting as the most important variable in this random forest.
+
+*SVM with polynomial kernel*
+
+Using w16 to represent the split in data according to the class
+```{r}
+ggplot(data = train_val_data)+geom_point(aes(x=c(1:nrow(train_val_data)),y=w16,col=class))+xlab("Observation Index")
+```
+The separation between the two classes is not clear and there is a great amount of overlapping. An SVM is used to transform this separation into a higher number of dimensions for an easier separation
+
+We use a polynomial kernel since we can not conform if the classes are linearly separable
+Hyper-parameters being tuned:
+C - cost
+scale
+degree - degree of the polynomial
+```{r}
+start_time<-Sys.time()
+tune_grid <- expand.grid(C = c(1,50,100, 200, 500),
+scale = c(0.1, 0.25, 0.5),
+degree = c(1, 2, 3, 4))
+
+set.seed(2022)
+data_svm_poly = train(class ~ ., data = train_val_data,
+method = "svmPoly",
+trControl = train_ctrl,
+tuneGrid = tune_grid)
+end_time<-Sys.time()
+plot(data_svm_poly)
+```
+Time taken
+```{r}
+end_time - start_time
+```
+
+```{r}
+comp_time[5,]<-c("SVM poly",round(end_time - start_time,3),"minutes")
+```
+
+
+The value for which we get the highest accuracy is achieved is found by:
+```{r}
+data_svm_poly$bestTune
+```
+A degree = 1 and scale = 0.1, C = 1 results in the highest accuracy
+A degree one indicates that the separation is infact linear.
+```{r}
+max(data_svm_poly$results$Accuracy)
+```
+
+```{r}
+stopCluster(cl)
+```
+
+Comparing the validation predictive performance of the models
+
+```{r}
+comp <- resamples(list(tree = data.tree,
+                       forest = data.forest,
+                       Bagging = data.bagg,
+                       Bossting = data.boost,
+                       svm_poly = data_svm_poly))
+summary(comp)
+```
+
+We observe that all of the methods employed have high accuracy,thus we put emphasis on the computational time for tuning and ease of interpretation.
+
+```{r}
+comp_time
+```
+
+Bagging is the best choice for us for the following reasons:
+The accuracy is approximately 100%
+It takes significantly less time to tune the method to our data with similar results to Boosting and random forest.
+Although it is slower than a decision tree, it's more stable due to the random sampling of the data-set.
+
+Predicting using the chosen model.
+```{r}
+# extract estimated class labels
+class_hat <- predict(data.bagg, newdata = test_data)
+# compute metrics
+confusionMatrix(class_hat, test_data$class,positive="hate")
+## Confusion Matrix and Statistics
+
+
+```
+
+We get a test accuracy of approximately 99%. 
